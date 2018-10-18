@@ -46,7 +46,7 @@ dyndep.InitOpsLibrary(op_root + 'distributed:file_store_handler_ops')
 dyndep.InitOpsLibrary(op_root + 'distributed:redis_store_handler_ops')
 
 
-def AddImageInput(model, reader, batch_size, img_size):
+def AddImageInput(model, reader, batch_size, img_size, is_test):
     '''
     Image input operator that loads data from reader and
     applies certain transformations to the images.
@@ -60,13 +60,14 @@ def AddImageInput(model, reader, batch_size, img_size):
         std=128.,
         minsize=32,
         crop=img_size,
-        mirror=1
+        mirror=1,
+        is_test=is_test
     )
     data = model.StopGradient(data, data)
 
 
 def SaveModel(args, train_model, epoch):
-    prefix = "gpu_{}".format(train_model._devices[0])
+    prefix = "{}_{}".format(train_model._device_prefix, train_model._devices[0])
     predictor_export_meta = pred_exp.PredictorExportMeta(
         predict_net=train_model.net.Proto(),
         parameters=data_parallel_model.GetCheckpointParams(train_model),
@@ -132,7 +133,7 @@ def RunEpoch(
     train_accuracy = 0
     train_loss = 0
     display_count = 10
-    prefix = "gpu_{}".format(train_model._devices[0])
+    prefix = "{}_{}".format(train_model._device_prefix, train_model._devices[0])
     for i in range(epoch_iters):
         # This timeout is required (temporarily) since CUDA-NCCL
         # operators might deadlock when synchronizing between GPUs.
@@ -155,10 +156,9 @@ def RunEpoch(
             train_loss = 0
 
     num_images = epoch * epoch_iters * total_batch_size
-    prefix = "gpu_{}".format(train_model._devices[0])
     accuracy = workspace.FetchBlob(prefix + '/accuracy')
     loss = workspace.FetchBlob(prefix + '/loss')
-    learning_rate = workspace.FetchBlob(prefix + '/conv1_w_lr')
+#    learning_rate = workspace.FetchBlob(data_parallel_model.GetLearningRateBlobNames(train_model)[0])
     test_accuracy = 0
     if (test_model is not None):
         # Run 100 iters of testing
@@ -182,7 +182,7 @@ def RunEpoch(
         additional_values={
             'accuracy': accuracy,
             'loss': loss,
-            'learning_rate': learning_rate,
+#            'learning_rate': learning_rate,
             'epoch': epoch,
             'test_accuracy': test_accuracy,
         }
@@ -301,6 +301,7 @@ def Train(args):
             reader,
             batch_size=batch_per_device,
             img_size=args.image_size,
+            is_test=False
         )
 
     # Create parallelized model
@@ -313,6 +314,9 @@ def Train(args):
         rendezvous=rendezvous,
         optimize_gradient_memory=True,
     )
+    workspace.RunNetOnce(train_model.param_init_net)
+    workspace.CreateNet(train_model.net)
+
     #
     # # save network graph
     # graph = net_drawer.GetPydotGraphMinimal(
@@ -345,6 +349,7 @@ def Train(args):
                 test_reader,
                 batch_size=batch_per_device,
                 img_size=args.image_size,
+                is_test=True
             )
 
         data_parallel_model.Parallelize_GPU(
@@ -356,9 +361,6 @@ def Train(args):
         )
         workspace.RunNetOnce(test_model.param_init_net)
         workspace.CreateNet(test_model.net)
-
-    workspace.RunNetOnce(train_model.param_init_net)
-    workspace.CreateNet(train_model.net)
 
     epoch = 0
     # load the pre-trained model and mobilenet epoch
